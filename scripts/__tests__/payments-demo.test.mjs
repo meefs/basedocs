@@ -822,3 +822,17 @@ test("pages with live flows describe USDV accurately", async () => {
     assert.doesNotMatch(source, /dUSD|demo B20 stablecoin/, page);
   }
 });
+
+test("the Get Started payments page does not call its live default demo mock only", async () => {
+  const source = await readFile(new URL("docs/get-started/accept-payments.mdx", root), "utf8");
+  assert.match(source, /<PaymentsDemo \/>/);
+  // The default demo runs these pills live whenever Vibenet is reachable.
+  const order = snippet.match(/const order = \[([^\]]+)\]/)[1].match(/"(\w+)"/g).map((key) => key.slice(1, -1));
+  const liveBlock = snippet.slice(snippet.indexOf("const LIVE_FLOWS = {"), snippet.indexOf("// mode: \"live\""));
+  const liveKeys = order.filter((key) => liveBlock.includes(`\n    ${key}: {\n      ...FLOWS.${key},`));
+  assert.deepEqual(liveKeys, ["accept", "authorize", "capture", "refund"], "default demo live pills");
+  const tip = source.slice(source.indexOf("<PaymentsDemo />")).match(/<Tip>([\s\S]*?)<\/Tip>/)[1];
+  assert.doesNotMatch(tip, /mock only|no transactions|nothing runs onchain/i, "Tip must not call the live demo mock only");
+  for (const label of ["Accept", "Authorize", "Capture", "Refund"]) assert.match(tip, new RegExp(label), `Tip names live pill ${label}`);
+  assert.match(source, /existing USDV test token, not USDC/);
+});

@@ -17,8 +17,16 @@
  * `risk: <level>` label. Nothing is enforced: it never approves or blocks.
  *
  * Reasons name the rule and the file, never the matched value (an address,
- * a URL), so the label cannot echo sensitive-looking content.
+ * a URL), so the label cannot echo sensitive-looking content. Each rule that
+ * sets the level also says what a reviewer should check (RULE_CHECKS).
+ *
+ * Generated index files (GENERATED) are rebuilt from the pages by a hook, so
+ * they never count toward size and their added lines are not scanned: the
+ * signals already come from the page they were generated from.
  */
+import fs from "node:fs";
+import path from "node:path";
+
 
 import { activateByPaths, activateGetStarted, activateSolutionGroups } from "../../.github/scripts/check-ia-approvals.mjs";
 import { findTab, parseNavConfig, topLevelGroupNames } from "../../.github/scripts/lib/docs-nav.mjs";
@@ -28,9 +36,41 @@ export const LEVELS = ["low", "medium", "high", "critical"];
 export const LEVEL_LABEL = { low: "Low", medium: "Medium", high: "High", critical: "Critical" };
 export const LEVEL_MEANING = {
   low: "one AI review",
-  medium: "three AI models review independently",
+  medium: "one AI review with a larger model",
   high: "one human reviewer (the tab owner), with an AI pre-review",
   critical: "the existing approval gates stay in charge",
+};
+
+/**
+ * What a reviewer should check when a rule sets the level. Keyed by rule id.
+ * Shown under the reasons so a label always comes with its reasoning.
+ */
+export const RULE_CHECKS = {
+  unknown: "The reviewer could not read everything it needs. Check the PR by hand.",
+  gate: "An existing approval gate applies. Follow that gate's approval rules.",
+  "section-rename": "Check that links and redirects still reach the renamed section.",
+  "primary-nav": "Check the new navigation in the preview and that no page is lost or duplicated.",
+  "site-settings": "Check the change in the preview on more than one page; it affects the whole site.",
+  "nav-moves": "Check that moved pages still have working links and redirects.",
+  "group-removed": "Check that every page in the removed group is still reachable or redirected.",
+  redirects: "Check that the old URLs still go somewhere useful.",
+  "docs-json": "Check the navigation change in the preview.",
+  legal: "Legal pages need sign-off from the page owner.",
+  workflow: "Workflow changes run in CI. Check them against the workflow's trust model.",
+  dependencies: "Check that the dependency change is intended and the lockfile matches.",
+  code: "Run the changed code or check its output.",
+  "contract-address": "Compare each new address with the deployment source for the right network, such as the block explorer or the contract repo.",
+  "rpc-url": "Check that the endpoint exists, serves the network the page names, and is meant for that use.",
+  "key-handling": "Check that the text never asks readers to paste, share or commit a private key or seed phrase.",
+  "chain-id-fee": "Check the chain ID or fee number against the current network values.",
+  "pages-changed": "Check navigation, links and redirects for the added, removed or renamed page.",
+  "primary-content": "This page is in a primary tab. Check the facts and the steps on it.",
+  "page-deletes": "Check that the removed content is not still needed or linked.",
+  size: "Large changes are easier to get wrong. Check the facts in every changed section.",
+  "primary-size": "A large edit to a primary tab. Check the facts and steps in each changed section.",
+  "pages-removed": "Check that redirects cover every removed or renamed page.",
+  "lines-deleted": "Check that the deleted content is not still needed or linked.",
+  "first-time-author": "First PR from this author. Check the facts and the placement.",
 };
 
 const GET_STARTED = { tab: "Get Started", prefix: "docs/get-started/" };
@@ -41,9 +81,11 @@ const LEGAL_PAGES = new Set(["docs/terms-of-service.mdx", "docs/privacy-policy.m
 const LOCKFILES = new Set(["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock", "npm-shrinkwrap.json"]);
 const CODE_EXT = /\.(?:[cm]?[jt]sx?|sol|py|go|rs|sh|ya?ml|toml)$/i;
 const CONTENT_PAGE = /^docs\/.+\.mdx?$/i;
+// Rebuilt from the pages by githooks/post-commit; not hand-edited.
+export const GENERATED = new Set(["docs/llms.txt", "docs/llms-full.txt", "docs/AGENTS.md"]);
 
 // Added-line signals. Each regex runs on lines a PR adds, never on context.
-const CONTRACT_ADDRESS = /\b0x[0-9a-fA-F]{40}\b/;
+const CONTRACT_ADDRESS = /\b0x[0-9a-fA-F]{40}\b/g;
 const RPC_URL = /\b(?:https?|wss?):\/\/[^\s)"'`<>\]]*(?:rpc|mainnet\.base\.org|sepolia\.base\.org|preconf)/i;
 const KEY_HANDLING = /\b(?:private[ _-]?keys?|PRIVATE_KEY|seed[ _-]?phrases?|mnemonic|secret[ _-]?keys?|keystore)\b/i;
 const CHAIN_ID_OR_FEE = /\b(?:8453|84532)\b|chain[ _-]?id\b[^\n]{0,40}\d|\b\d+(?:\.\d+)?\s*g?wei\b|\b(?:base fee|priority fee|gas price|l1 fee|data fee)\b[^\n]{0,40}\d/i;
@@ -76,6 +118,33 @@ function addedLines(patch) {
     .split("\n")
     .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
     .map((l) => l.slice(1));
+}
+
+function removedLines(patch) {
+  return (patch || "")
+    .split("\n")
+    .filter((l) => l.startsWith("-") && !l.startsWith("---"))
+    .map((l) => l.slice(1));
+}
+
+const addressesIn = (text) => (text.match(CONTRACT_ADDRESS) || []).map((a) => a.toLowerCase());
+
+/**
+ * Every contract-length hex address in the docs pages of a checkout, lower
+ * case. Run on the trusted default-branch checkout, so a PR cannot add to it.
+ */
+export function knownAddressesIn(repoRoot) {
+  const known = new Set();
+  const walk = (dir, depth) => {
+    if (depth > 12) return;
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p, depth + 1);
+      else if (/\.mdx?$/i.test(e.name)) for (const a of addressesIn(fs.readFileSync(p, "utf8"))) known.add(a);
+    }
+  };
+  walk(path.join(repoRoot, "docs"), 0);
+  return known;
 }
 
 /** Every page ref in a tab, mapped to the chain of group names above it. */
@@ -121,9 +190,11 @@ const redirectKeys = (config) =>
  *        raw docs.json text at base and head; null when the PR does not touch it
  * @param {object} input.governance       .github/ia-governance.json from the default branch
  * @param {boolean|null} input.firstTimeAuthor  null when it could not be checked
+ * @param {Set<string>} [input.knownAddresses]  lower-case addresses already in the docs (default
+ *        branch); without it every added address counts as new
  * @returns {{level:string, reasons:Array<{level:string, rule:string, text:string}>}}
  */
-export function classifyRisk({ files, changedFiles, nav, governance, firstTimeAuthor }) {
+export function classifyRisk({ files, changedFiles, nav, governance, firstTimeAuthor, knownAddresses }) {
   const reasons = [];
   const add = (level, rule, text) => reasons.push({ level, rule, text });
   const navPath = governance?.navConfigPath || "docs/docs.json";
@@ -214,13 +285,19 @@ export function classifyRisk({ files, changedFiles, nav, governance, firstTimeAu
   let otherTabPagesRemovedOrRenamed = 0;
   let linesDeleted = 0;
   let totalLines = 0;
+  let sizedFiles = 0;
   let onlyNonDocs = true;
+  let repeatedAddresses = 0;
 
   for (const f of files) {
     const name = f.filename;
     const isPage = CONTENT_PAGE.test(name) || (f.previous_filename && CONTENT_PAGE.test(f.previous_filename));
-    totalLines += lines(f);
-    linesDeleted += f.deletions || 0;
+    const generated = GENERATED.has(name);
+    if (!generated) {
+      totalLines += lines(f);
+      linesDeleted += f.deletions || 0;
+      sizedFiles++;
+    }
     if (name.startsWith("docs/") || name.startsWith(".github/") || name.startsWith("scripts/") || name.startsWith("examples/") || base(name) === "package.json" || LOCKFILES.has(base(name))) {
       onlyNonDocs = false;
     }
@@ -232,8 +309,13 @@ export function classifyRisk({ files, changedFiles, nav, governance, firstTimeAu
       add("medium", "code", `changes code in \`${name}\``);
     }
 
+    if (generated) continue;
     const plus = addedLines(f.patch);
-    if (plus.some((l) => CONTRACT_ADDRESS.test(l))) add("high", "contract-address", `adds a contract address in \`${name}\``);
+    const moved = new Set(addressesIn(removedLines(f.patch).join("\n")));
+    const added = [...new Set(addressesIn(plus.join("\n")))];
+    const fresh = added.filter((a) => !moved.has(a) && !knownAddresses?.has(a));
+    if (fresh.length) add("high", "contract-address", `adds ${fresh.length === 1 ? "a contract address" : `${fresh.length} contract addresses`} not already in the docs in \`${name}\``);
+    repeatedAddresses += added.length - fresh.length;
     if (plus.some((l) => RPC_URL.test(l))) add("high", "rpc-url", `adds an RPC URL in \`${name}\``);
     if (plus.some((l) => KEY_HANDLING.test(l))) add("high", "key-handling", `adds key-handling text in \`${name}\``);
     if (plus.some((l) => CHAIN_ID_OR_FEE.test(l))) add("medium", "chain-id-fee", `adds or changes a chain ID or fee number in \`${name}\``);
@@ -256,8 +338,8 @@ export function classifyRisk({ files, changedFiles, nav, governance, firstTimeAu
   }
 
   // ---------------------------------------------------------- size
-  if (totalLines > SIZE.lowMaxLines || files.length > SIZE.lowMaxFiles) {
-    add("medium", "size", `changes ${totalLines} lines across ${files.length} files (low allows up to ${SIZE.lowMaxLines} lines and ${SIZE.lowMaxFiles} files)`);
+  if (totalLines > SIZE.lowMaxLines || sizedFiles > SIZE.lowMaxFiles) {
+    add("medium", "size", `changes ${totalLines} lines across ${sizedFiles} files, not counting generated index files (low allows up to ${SIZE.lowMaxLines} lines and ${SIZE.lowMaxFiles} files)`);
   }
   if (primaryEdits[GET_STARTED.tab] > SIZE.getStartedEditHigh) {
     add("high", "primary-size", `edits ${primaryEdits[GET_STARTED.tab]} lines in Get Started (over ${SIZE.getStartedEditHigh})`);
@@ -281,6 +363,9 @@ export function classifyRisk({ files, changedFiles, nav, governance, firstTimeAu
   // ---------------------------------------------------------- result
   if (!reasons.length) {
     add("low", "small", onlyNonDocs && files.length ? "changes non-docs files only" : "small change with no risk signals");
+  }
+  if (repeatedAddresses) {
+    add("low", "known-address", `repeats ${repeatedAddresses === 1 ? "a contract address" : `${repeatedAddresses} contract addresses`} already in the docs (not a risk signal)`);
   }
   const level = reasons.reduce((max, r) => (rank(r.level) > rank(max) ? r.level : max), "low");
   const seen = new Set();
@@ -326,6 +411,11 @@ export function renderRisk(risk, { maxReasons = 8 } = {}) {
   const out = [`**Risk:** ${LEVEL_LABEL[risk.level]} (${LEVEL_MEANING[risk.level]}) · \`${RISK_LABELS[risk.level]}\` · shadow mode, not enforced`, ""];
   for (const r of top.slice(0, maxReasons)) out.push(`- ${r.text}`);
   if (top.length > maxReasons) out.push(`- and ${top.length - maxReasons} more`);
+  const checks = [...new Set(top.map((r) => r.rule))].map((rule) => RULE_CHECKS[rule]).filter(Boolean);
+  if (checks.length) {
+    out.push("", "What to check:");
+    for (const c of checks) out.push(`- ${c}`);
+  }
   if (rest.length) {
     out.push("", "<details><summary>Lower-level signals</summary>", "");
     for (const r of rest.slice(0, maxReasons)) out.push(`- ${LEVEL_LABEL[r.level]}: ${r.text}`);

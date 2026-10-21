@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { classifyRisk, renderRisk } from "../risk.mjs";
+import { classifyRisk, knownAddressesIn, renderRisk, RULE_CHECKS } from "../risk.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const governance = JSON.parse(fs.readFileSync(path.join(ROOT, ".github", "ia-governance.json"), "utf8"));
@@ -120,6 +120,36 @@ test("high: added contract address, RPC URL, or key-handling text; the value is 
   assert.equal(classify([file("docs/base-chain/x.mdx", { added: ["Removed."], removed: [ADDRESS] })]).level, "low");
 });
 
+test("contract address: one already in the docs, or moved within the file, is not new", () => {
+  const known = new Set([ADDRESS.toLowerCase()]);
+  const repeat = classify([file("docs/base-chain/x.mdx", { added: [`Multicall: ${ADDRESS.toUpperCase().replace("0X", "0x")}`] })], { knownAddresses: known });
+  assert.equal(repeat.level, "low");
+  assert.deepEqual(rules(repeat), ["low:small", "low:known-address"]);
+  // Editing a table row keeps the same address: not new even without the known set.
+  assert.equal(classify([file("docs/base-chain/x.mdx", { added: [`| WETH | ${ADDRESS} | new |`], removed: [`| WETH | ${ADDRESS} |`] })]).level, "low");
+  // One new address among known ones still makes it high, and the reason counts only the new one.
+  const other = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  const mixed = classify([file("docs/base-chain/x.mdx", { added: [ADDRESS, other] })], { knownAddresses: known });
+  assert.equal(mixed.level, "high");
+  assert.match(mixed.reasons[0].text, /adds a contract address not already in the docs/);
+  assert.ok(!JSON.stringify(mixed).includes(other));
+});
+
+test("knownAddressesIn: reads the docs pages of a checkout, lower case", () => {
+  const known = knownAddressesIn(ROOT);
+  assert.ok(known.size > 0);
+  assert.ok([...known].every((a) => a === a.toLowerCase()));
+});
+
+test("generated index files never count toward size or signals", () => {
+  // #2135: two one-line page edits plus their regenerated index lines.
+  const gen = (filename, n) => file(filename, { added: Array.from({ length: n }, (_, i) => `Index ${i} ${ADDRESS} https://mainnet.base.org`) });
+  const r = classify([file("docs/specifications/a.mdx"), file("docs/specifications/b.mdx"), gen("docs/llms.txt", 4), gen("docs/llms-full.txt", 30), gen("docs/AGENTS.md", 2)]);
+  assert.equal(r.level, "low");
+  // Generated files alone are low too.
+  assert.equal(classify([gen("docs/llms-full.txt", 40)]).level, "low");
+});
+
 test("high: legal pages, workflows, package.json, lockfiles", () => {
   for (const f of ["docs/privacy-policy.mdx", ".github/workflows/deploy.yml", "package.json", "scripts/package-lock.json"]) {
     assert.equal(classify([file(f)]).level, "high", f);
@@ -189,8 +219,16 @@ test("renderRisk: level line, reasons, and a rule-only machine record", () => {
   assert.match(md, /\*\*Risk:\*\* High \(one human reviewer/);
   assert.match(md, /shadow mode, not enforced/);
   assert.match(md, /Lower-level signals/);
+  assert.match(md, /What to check:\n- Compare each new address with the deployment source/);
   assert.match(md, /<!-- docs-pr-review:risk \{"level":"high","rules":\["high:contract-address","medium:chain-id-fee"\]\} -->/);
   assert.ok(!md.includes(ADDRESS));
+});
+
+test("RULE_CHECKS: every rule that can set a level above low says what to check", () => {
+  const src = fs.readFileSync(path.join(ROOT, "scripts", "docs-pr-review", "risk.mjs"), "utf8");
+  const used = new Set([...src.matchAll(/add\("(?:medium|high|critical)", "([a-z-]+)"/g)].map((m) => m[1]));
+  assert.ok(used.size > 15);
+  for (const rule of used) assert.ok(RULE_CHECKS[rule], `missing check for ${rule}`);
 });
 
 test("planRiskLabels: exactly one risk label, other labels untouched", async () => {

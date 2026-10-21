@@ -52,7 +52,7 @@ import {
   reviewMarker,
   validateReview,
 } from "./render.mjs";
-import { classifyRisk, planRiskLabels, renderRisk, reviewModelFor } from "./risk.mjs";
+import { classifyRisk, knownAddressesIn, planRiskLabels, renderRisk, reviewModelFor } from "./risk.mjs";
 
 const args = new Set(process.argv.slice(2));
 const DRY_RUN = args.has("--dry-run") || process.env.DRY_RUN === "true";
@@ -313,8 +313,17 @@ async function assessRisk({ gh, pr, files, repoRoot }) {
     console.warn(`::warning title=Author history unavailable::${err.message}`);
   }
 
+  // Addresses already in the default-branch docs are not new risk. On failure
+  // every added address counts as new, which is the safe side.
+  let knownAddresses;
+  try {
+    knownAddresses = knownAddressesIn(repoRoot);
+  } catch (err) {
+    console.warn(`::warning title=Known addresses unavailable::${err.message}`);
+  }
+
   return {
-    risk: classifyRisk({ files, changedFiles: pr.changed_files, nav, governance, firstTimeAuthor }),
+    risk: classifyRisk({ files, changedFiles: pr.changed_files, nav, governance, firstTimeAuthor, knownAddresses }),
     prNavText: nav && !nav.error && typeof nav.head === "string" ? nav.head : null,
   };
 }

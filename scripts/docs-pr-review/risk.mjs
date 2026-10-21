@@ -71,6 +71,7 @@ export const RULE_CHECKS = {
   "pages-removed": "Check that redirects cover every removed or renamed page.",
   "lines-deleted": "Check that the deleted content is not still needed or linked.",
   "first-time-author": "First PR from this author. Check the facts and the placement.",
+  "funds-risk": "Check every address, endpoint, chain ID, amount and key-handling step in the added lines against its source.",
 };
 
 const GET_STARTED = { tab: "Get Started", prefix: "docs/get-started/" };
@@ -373,6 +374,16 @@ export function classifyRisk({ files, changedFiles, nav, governance, firstTimeAu
     .filter((r) => (seen.has(r.text) ? false : seen.add(r.text)))
     .sort((a, b) => rank(b.level) - rank(a.level));
   return { level, reasons: unique };
+}
+
+/**
+ * Add one reason from outside the fixed rules (the decision model) and
+ * recompute the level. It can only raise the level, never lower it.
+ */
+export function raiseRisk(risk, reason) {
+  const reasons = [...risk.reasons.filter((r) => !(r.rule === "small" && rank(reason.level) > rank("low"))), reason].sort((a, b) => rank(b.level) - rank(a.level));
+  const level = rank(reason.level) > rank(risk.level) ? reason.level : risk.level;
+  return { level, reasons };
 }
 
 /**

@@ -328,6 +328,7 @@ export function renderSummary({
   history = null,
   suppressed = [],
   state = "",
+  minor = new Set(),
 }) {
   const inlineSet = new Set(inlineFindings);
   const out = [STICKY_MARKER, "## Docs review", ""];
@@ -338,9 +339,9 @@ export function renderSummary({
   out.push(`**Verdict:** ${VERDICT_LABEL[review.verdict]} · reviewed \`${headSha.slice(0, 7)}\`${model ? ` with \`${model}\`` : ""}${round}`, "");
   if (review.summary) out.push(review.summary, "");
 
-  const section = (label, items) => {
+  const section = (label, items, heading = true) => {
     if (!items.length) return;
-    out.push(`### ${label}`, "");
+    if (heading) out.push(`### ${label}`, "");
     items.forEach((f, i) => {
       const where = f.line ? `\`${f.file}\` L${f.line}${f.endLine && f.endLine !== f.line ? `–${f.endLine}` : ""}` : `\`${f.file}\``;
       const note = inlineSet.has(f)
@@ -355,7 +356,14 @@ export function renderSummary({
     out.push("");
   };
   section("Blocking", review.findings.filter((f) => f.severity === "blocking"));
-  section("Suggestions", review.findings.filter((f) => f.severity === "suggestion"));
+  section("Suggestions", review.findings.filter((f) => f.severity === "suggestion" && !minor.has(f)));
+  const minorItems = review.findings.filter((f) => f.severity === "suggestion" && minor.has(f));
+  if (minorItems.length) {
+    out.push(`<details><summary>Minor suggestions (${minorItems.length})</summary>`, "");
+    out.push("A decision model rated these as wording changes that would not mislead a reader, so they are not posted inline.", "");
+    section("Minor", minorItems, false);
+    out.push("</details>", "");
+  }
   if (!review.findings.length) out.push(history ? "No new findings since the previous review." : "No findings.", "");
 
   out.push("<details><summary>What the reviewer checked</summary>", "");

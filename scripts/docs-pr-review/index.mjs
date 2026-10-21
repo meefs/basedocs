@@ -11,12 +11,15 @@
  * Flow:
  *   0. Risk level (risk.mjs): fixed rules from the review ladder, no model.
  *      Shown at the top of the summary and as one `risk: <level>` label,
- *      in shadow mode; never enforced.
+ *      in shadow mode; never enforced. A decision model (decisions.mjs) can
+ *      raise it to high when a wrong value could cost readers funds.
  *   1. List the PR's changed files; keep documentation pages only.
  *   2. Build deterministic facts (placement, index section, neighbors, links).
  *   3. One LLM Gateway call → structured JSON review. The model depends on
  *      the risk level: GPT-6 Luna for low, Claude Sonnet for everything else.
- *   4. Validate the JSON; post/update one summary comment; post inline
+ *   4. Validate the JSON. A decision model scores each non-blocking finding;
+ *      ones that would not mislead a reader stay in the summary as minor
+ *      suggestions. Post/update one summary comment; post inline
  *      suggestion comments once per head commit.
  *
  * Follow-up rounds (history.mjs): when the PR was reviewed before, the model
@@ -42,6 +45,7 @@ import { createGitHub, isWorkflowBot } from "./github.mjs";
 import { buildFileFacts, isReviewablePage, loadSite, prPageChanges, readCapped } from "./context.mjs";
 import { SYSTEM_PROMPT, buildReviewPrompt } from "./prompts.mjs";
 import { applyFollowUpScope, changesSince, loadHistory, nextState, renderState } from "./history.mjs";
+import { FUNDS_RISK_THRESHOLD, fundsRisk, minorFindings, scoreFindings } from "./decisions.mjs";
 import {
   STICKY_MARKER,
   extractJson,
@@ -52,7 +56,7 @@ import {
   reviewMarker,
   validateReview,
 } from "./render.mjs";
-import { classifyRisk, knownAddressesIn, planRiskLabels, renderRisk, reviewModelFor } from "./risk.mjs";
+import { classifyRisk, knownAddressesIn, planRiskLabels, raiseRisk, renderRisk, reviewModelFor } from "./risk.mjs";
 
 const args = new Set(process.argv.slice(2));
 const DRY_RUN = args.has("--dry-run") || process.env.DRY_RUN === "true";
@@ -93,8 +97,19 @@ async function main() {
       ? `${process.env.GITHUB_SERVER_URL}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`
       : "";
 
-  // 0) Risk label. Deterministic; any lookup failure raises the level instead of failing the run.
-  const { risk, prNavText } = await assessRisk({ gh, pr, files: allFiles, repoRoot });
+  // 0) Risk label. Fixed rules; any lookup failure raises the level instead of failing the run.
+  const assessed = await assessRisk({ gh, pr, files: allFiles, repoRoot });
+  const { prNavText } = assessed;
+  let risk = assessed.risk;
+  // The decision model can only raise the level. It fails open (null).
+  const fundsP = CONTEXT_ONLY ? null : await fundsRisk(allFiles);
+  if (fundsP !== null && fundsP >= FUNDS_RISK_THRESHOLD) {
+    risk = raiseRisk(risk, {
+      level: "high",
+      rule: "funds-risk",
+      text: `a decision model rates a wrong value in the added lines as able to cost readers funds (${fundsP.toFixed(2)})`,
+    });
+  }
   const riskBlock = renderRisk(risk);
   console.log(`::notice title=Risk level::${risk.level} (${risk.reasons.map((r) => r.rule).join(", ")})`);
   if (!DRY_RUN && !CONTEXT_ONLY) await syncRiskLabel(gh, pr, risk.level);
@@ -214,7 +229,9 @@ async function main() {
   review.findings = kept;
   // "Fits, with changes" and nothing left to change reads as a contradiction.
   if (history && !kept.length && review.verdict === "fits_with_changes") review.verdict = "fits";
-  const { inline, withheld } = planInlineComments(review.findings, patches, heads);
+  // Non-blocking findings that would not mislead a reader stay in the summary only.
+  const minor = minorFindings(await scoreFindings(review.findings, patches));
+  const { inline, withheld } = planInlineComments(review.findings.filter((f) => !minor.has(f)), patches, heads);
   const summary = renderSummary({
     review,
     facts,
@@ -226,6 +243,7 @@ async function main() {
     model,
     history,
     suppressed,
+    minor,
     state: renderState(nextState({ history, headSha, findings: review.findings })),
   });
 
@@ -241,7 +259,7 @@ async function main() {
 
   if (DRY_RUN) {
     console.log(summary);
-    console.log(`\nInline suggestions: ${inline.length} (withheld: ${withheld.size})`);
+    console.log(`\nInline suggestions: ${inline.length} (withheld: ${withheld.size}, minor: ${minor.size})`);
     for (const i of inline) console.log(`- ${i.comment.path}:${i.comment.line}\n${i.comment.body}\n`);
     return;
   }
@@ -274,7 +292,7 @@ async function main() {
   await minimizeOutdatedSuggestions(gh, prNumber);
 
   console.log(
-    `::notice title=Docs review posted::risk=${risk.level} model=${model} round=${history ? history.round : 1} verdict=${review.verdict} findings=${review.findings.length} suppressed=${suppressed.length} inline=${inline.length} withheld=${withheld.size}`,
+    `::notice title=Docs review posted::risk=${risk.level} model=${model} round=${history ? history.round : 1} verdict=${review.verdict} findings=${review.findings.length} suppressed=${suppressed.length} inline=${inline.length} withheld=${withheld.size} minor=${minor.size} funds_risk=${fundsP === null ? "n/a" : fundsP.toFixed(2)}`,
   );
 }
 

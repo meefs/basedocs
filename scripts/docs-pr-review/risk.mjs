@@ -36,8 +36,8 @@ export const LEVELS = ["low", "medium", "high", "critical"];
 export const LEVEL_LABEL = { low: "Low", medium: "Medium", high: "High", critical: "Critical" };
 export const LEVEL_MEANING = {
   low: "one AI review",
-  medium: "one AI review with a larger model",
-  high: "one human reviewer (the tab owner), with an AI pre-review",
+  medium: "two AI models review independently",
+  high: "one human reviewer (the tab owner), with an AI pre-review checked by a second model",
   critical: "the existing approval gates stay in charge",
 };
 
@@ -384,19 +384,6 @@ export function raiseRisk(risk, reason) {
   const reasons = [...risk.reasons.filter((r) => !(r.rule === "small" && rank(reason.level) > rank("low"))), reason].sort((a, b) => rank(b.level) - rank(a.level));
   const level = rank(reason.level) > rank(risk.level) ? reason.level : risk.level;
   return { level, reasons };
-}
-
-/**
- * Model for the content review, by risk level. Low-risk PRs use GPT-6 Luna;
- * every other level uses Claude Sonnet. Both go through the same LLM Gateway
- * client and host. Repository variables override the defaults without a code
- * change: DOCS_PR_REVIEW_MODEL_LOW for low, DOCS_PR_REVIEW_MODEL (passed as
- * CLAUDE_MODEL) for the rest.
- */
-export const DEFAULT_REVIEW_MODELS = { low: "gpt-6-luna", other: "claude-sonnet-5-5" };
-export function reviewModelFor(level, env = process.env) {
-  if (level === "low") return env.DOCS_PR_REVIEW_MODEL_LOW || DEFAULT_REVIEW_MODELS.low;
-  return env.CLAUDE_MODEL || DEFAULT_REVIEW_MODELS.other;
 }
 
 /** The only labels this workflow ever adds or removes. Created once by a maintainer. */

@@ -240,13 +240,3 @@ test("planRiskLabels: exactly one risk label, other labels untouched", async () 
     remove: ["risk: low", "risk: medium"],
   });
 });
-
-test("reviewModelFor: Luna for low, Sonnet for everything else, variables override", async () => {
-  const { reviewModelFor } = await import("../risk.mjs");
-  assert.equal(reviewModelFor("low", {}), "gpt-6-luna");
-  for (const level of ["medium", "high", "critical"]) assert.equal(reviewModelFor(level, {}), "claude-sonnet-5-5");
-  assert.equal(reviewModelFor("low", { DOCS_PR_REVIEW_MODEL_LOW: "gpt-6-sol" }), "gpt-6-sol");
-  assert.equal(reviewModelFor("high", { CLAUDE_MODEL: "claude-opus-5-5" }), "claude-opus-5-5");
-  // An unset repository variable arrives as an empty string and falls back to the default.
-  assert.equal(reviewModelFor("low", { DOCS_PR_REVIEW_MODEL_LOW: "" }), "gpt-6-luna");
-});

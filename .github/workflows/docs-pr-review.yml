@@ -67,7 +67,9 @@ jobs:
       vars.DISABLE_DOCS_PR_REVIEW != 'true'
     runs-on:
       group: BaseRunnerGroup
-    timeout-minutes: 15
+    # High and critical PRs run two model calls in sequence (Opus, then a
+    # Sonnet check), so allow more than the single-review p90 of ~10 minutes.
+    timeout-minutes: 25
     permissions:
       contents: read
       pull-requests: write
@@ -184,10 +186,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LLM_GATEWAY_API_KEY: ${{ secrets.LLM_GATEWAY_API_KEY }}
-          # Model by risk level: low -> DOCS_PR_REVIEW_MODEL_LOW (default gpt-6-luna),
-          # everything else -> DOCS_PR_REVIEW_MODEL (default claude-sonnet-5-5).
+          # Models by risk level (scripts/docs-pr-review/panel.mjs); empty means the default.
+          #   low: DOCS_PR_REVIEW_MODEL_LOW (gpt-6-luna)
+          #   medium: DOCS_PR_REVIEW_MODEL (claude-sonnet-5-5) and DOCS_PR_REVIEW_MODEL_SECOND (gpt-6-luna)
+          #   high, critical: DOCS_PR_REVIEW_MODEL_HIGH (claude-opus-5-5), checked by
+          #     DOCS_PR_REVIEW_MODEL_VERIFIER (falls back to DOCS_PR_REVIEW_MODEL, then claude-sonnet-5-5)
           CLAUDE_MODEL: ${{ vars.DOCS_PR_REVIEW_MODEL }}
           DOCS_PR_REVIEW_MODEL_LOW: ${{ vars.DOCS_PR_REVIEW_MODEL_LOW }}
+          DOCS_PR_REVIEW_MODEL_SECOND: ${{ vars.DOCS_PR_REVIEW_MODEL_SECOND }}
+          DOCS_PR_REVIEW_MODEL_HIGH: ${{ vars.DOCS_PR_REVIEW_MODEL_HIGH }}
+          DOCS_PR_REVIEW_MODEL_VERIFIER: ${{ vars.DOCS_PR_REVIEW_MODEL_VERIFIER }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}

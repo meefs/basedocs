@@ -329,6 +329,8 @@ export function renderSummary({
   suppressed = [],
   state = "",
   minor = new Set(),
+  modelLabel = "",
+  rejected = [],
 }) {
   const inlineSet = new Set(inlineFindings);
   const out = [STICKY_MARKER, "## Docs review", ""];
@@ -336,7 +338,8 @@ export function renderSummary({
   const round = history
     ? ` · follow-up round ${history.round}, ${history.since ? "changes since" : "compared with"} \`${history.previousSha.slice(0, 7)}\``
     : "";
-  out.push(`**Verdict:** ${VERDICT_LABEL[review.verdict]} · reviewed \`${headSha.slice(0, 7)}\`${model ? ` with \`${model}\`` : ""}${round}`, "");
+  const who = modelLabel || (model ? `\`${model}\`` : "");
+  out.push(`**Verdict:** ${VERDICT_LABEL[review.verdict]} · reviewed \`${headSha.slice(0, 7)}\`${who ? ` with ${who}` : ""}${round}`, "");
   if (review.summary) out.push(review.summary, "");
 
   const section = (label, items, heading = true) => {
@@ -349,9 +352,10 @@ export function renderSummary({
         : withheld.has(f)
           ? ` — suggested edit withheld because ${withheld.get(f)}; make this change by hand if you agree`
           : "";
-      out.push(`${i + 1}. **${f.title}** (${f.category}, ${where})${note}`);
+      out.push(`${i + 1}. **${f.title}** (${f.category}, ${where})${note}${f.agreed ? " — raised by both reviewers" : ""}`);
       if (f.detail) out.push(`   ${f.detail}`);
       if (f.evidence) out.push(`   _Evidence:_ ${f.evidence}`);
+      if (f.disputed) out.push(`   _The second reviewer disagrees:_ ${f.disputed}`);
     });
     out.push("");
   };
@@ -363,6 +367,14 @@ export function renderSummary({
     out.push("A decision model rated these as wording changes that would not mislead a reader, so they are not posted inline.", "");
     section("Minor", minorItems, false);
     out.push("</details>", "");
+  }
+  if (rejected.length) {
+    out.push(`<details><summary>Dropped by the second reviewer (${rejected.length})</summary>`, "");
+    for (const { finding: f, reason } of rejected) {
+      const where = f.line ? `\`${f.file}\` L${f.line}` : `\`${f.file}\``;
+      out.push(`- **${f.title}** (${f.category}, ${where}): ${reason}`);
+    }
+    out.push("", "</details>", "");
   }
   if (!review.findings.length) out.push(history ? "No new findings since the previous review." : "No findings.", "");
 
@@ -378,6 +390,7 @@ export function renderSummary({
     out.push("", "Links added: " + links.map((l) => `\`${l.href}\` (${l.verdict})`).join(", "));
   }
   if (review.dropped.length) out.push("", `${review.dropped.length} malformed finding(s) were discarded.`);
+  if (review.capped) out.push("", `${review.capped} lower-priority finding(s) from the two reviews were left out to stay within the limit.`);
   if (suppressed.length) {
     out.push(
       "",

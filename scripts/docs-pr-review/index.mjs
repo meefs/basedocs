@@ -15,8 +15,9 @@
  *      raise it to high when a wrong value could cost readers funds.
  *   1. List the PR's changed files; keep documentation pages only.
  *   2. Build deterministic facts (placement, index section, neighbors, links).
- *   3. One LLM Gateway call → structured JSON review. The model depends on
- *      the risk level: GPT-6 Luna for low, Claude Sonnet for everything else.
+ *   3. LLM Gateway review(s) → structured JSON (panel.mjs). By risk level:
+ *      low, GPT-6 Luna; medium, Claude Sonnet and GPT-6 Luna independently,
+ *      merged; high and critical, Claude Opus, checked by Claude Sonnet.
  *   4. Validate the JSON. A decision model scores each non-blocking finding;
  *      ones that would not mislead a reader stay in the summary as minor
  *      suggestions. Post/update one summary comment; post inline
@@ -48,15 +49,14 @@ import { applyFollowUpScope, changesSince, loadHistory, nextState, renderState }
 import { FUNDS_RISK_THRESHOLD, fundsRisk, minorFindings, scoreFindings } from "./decisions.mjs";
 import {
   STICKY_MARKER,
-  extractJson,
   outboundViolation,
   planInlineComments,
   renderRiskOnlySummary,
   renderSummary,
   reviewMarker,
-  validateReview,
 } from "./render.mjs";
-import { classifyRisk, knownAddressesIn, planRiskLabels, raiseRisk, renderRisk, reviewModelFor } from "./risk.mjs";
+import { classifyRisk, knownAddressesIn, planRiskLabels, raiseRisk, renderRisk } from "./risk.mjs";
+import { planText, reviewPlanFor, runPanel } from "./panel.mjs";
 
 const args = new Set(process.argv.slice(2));
 const DRY_RUN = args.has("--dry-run") || process.env.DRY_RUN === "true";
@@ -198,10 +198,10 @@ async function main() {
     history,
   });
 
-  const model = reviewModelFor(risk.level);
+  const plan = reviewPlanFor(risk.level);
   if (CONTEXT_ONLY) {
     console.log(riskBlock);
-    console.log(`Review model: ${model}`);
+    console.log(`Review plan: ${plan.mode} (${planText(plan)})`);
     console.log(JSON.stringify(facts.map((f) => ({ ...f, neighbors: f.neighbors.map((n) => n.route), destinationPage: f.destinationPage && { route: f.destinationPage.route, file: f.destinationPage.file } })), null, 2));
     console.log(`\nPrompt: ${prompt.length} chars (system ${SYSTEM_PROMPT.length})`);
     return;
@@ -209,18 +209,20 @@ async function main() {
 
   // Imported lazily so --context-only works without the SDK or a gateway key.
   const { complete, BENCH_LOG } = await import("../sync-from-base-std/llm/client.mjs");
-  let review;
+  let panel;
   try {
-    const { text, stopReason } = await complete(prompt, `pr-${prNumber}`, {
-      system: SYSTEM_PROMPT,
-      model,
-      maxTokens: 8192,
+    panel = await runPanel({
+      plan,
+      prompt,
+      validFiles: new Set(reviewed.map((f) => f.filename)),
+      completeFn: complete,
+      tag: `pr-${prNumber}`,
     });
-    if (stopReason === "max_tokens") throw new Error("model output was truncated");
-    review = validateReview(extractJson(text), new Set(reviewed.map((f) => f.filename)));
   } finally {
     flushBench(BENCH_LOG, prNumber);
   }
+  const { review, rejected } = panel;
+  const model = panel.models.join("+");
 
   const patches = new Map(reviewed.map((f) => [f.filename, f.patch || ""]));
   const heads = new Map([...contents].map(([file, c]) => [file, c.headContent]));
@@ -229,8 +231,10 @@ async function main() {
   review.findings = kept;
   // "Fits, with changes" and nothing left to change reads as a contradiction.
   if (history && !kept.length && review.verdict === "fits_with_changes") review.verdict = "fits";
-  // Non-blocking findings that would not mislead a reader stay in the summary only.
+  // Non-blocking findings that would not mislead a reader stay in the summary
+  // only, unless both reviewers in a pair raised them.
   const minor = minorFindings(await scoreFindings(review.findings, patches));
+  for (const f of minor) if (f.agreed) minor.delete(f);
   const { inline, withheld } = planInlineComments(review.findings.filter((f) => !minor.has(f)), patches, heads);
   const summary = renderSummary({
     review,
@@ -240,7 +244,8 @@ async function main() {
     withheld,
     runUrl,
     riskBlock,
-    model,
+    modelLabel: panel.label,
+    rejected,
     history,
     suppressed,
     minor,
